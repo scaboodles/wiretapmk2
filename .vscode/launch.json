@@ -1,0 +1,28 @@
+{
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "sourceLanguages": [
+                "swift"
+            ],
+            "args": [],
+            "cwd": "${workspaceFolder:wiretapmk2}",
+            "name": "Debug wiretapmk2",
+            "program": "${workspaceFolder:wiretapmk2}/.build/debug/wiretapmk2",
+            "preLaunchTask": "swift: Build Debug wiretapmk2"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "sourceLanguages": [
+                "swift"
+            ],
+            "args": [],
+            "cwd": "${workspaceFolder:wiretapmk2}",
+            "name": "Release wiretapmk2",
+            "program": "${workspaceFolder:wiretapmk2}/.build/release/wiretapmk2",
+            "preLaunchTask": "swift: Build Release wiretapmk2"
+        }
+    ]
+}
