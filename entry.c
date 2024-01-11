@@ -7,6 +7,12 @@
 #include <fftw3.h>
 #include <math.h>
 #include <ncurses.h>
+#include <pthread.h>
+
+
+const int samplesize = 1500;
+int shared_data[samplesize/2];
+pthread_mutex_t mutex;
 
 int init_curses(){
     initscr(); cbreak(); noecho(); // curses bs 
@@ -43,9 +49,30 @@ void min_max_normalization(double arr[], int size) {
     }
 }
 
-void draw_viz(long int * mags, int num_frames){
+void z_score_normalization(double arr[], int size) {
+    double sum = 0.0;
+    double sum_sq = 0.0;
+
+    for (int i = 0; i < size; ++i) {
+        sum += arr[i];
+        sum_sq += arr[i] * arr[i];
+    }
+
+    double mean = sum / size;
+    double variance = (sum_sq - (sum * sum) / size) / (size - 1);
+    double std_deviation = sqrt(variance);
+
+    for (int i = 0; i < size; ++i) {
+        arr[i] = (arr[i] - mean) / std_deviation;
+    }
+}
+
+void draw_viz(int * mags, int num_frames){
     clear();
     for(int i = 0; i < num_frames; i++){
+        if(i >= COLS){
+            break;
+        }
         for(int j = 0; j < mags[i]; j++){
             int y = LINES - 1 - j;
             mvaddch(y, i, ACS_BLOCK);
@@ -54,11 +81,32 @@ void draw_viz(long int * mags, int num_frames){
     refresh();
 }
 
+void * animation_thread(){
+    sleep(1);
+    while(1){
+        int mags[samplesize/2];
+        pthread_mutex_lock(&mutex);
+        for(int i = 0; i < samplesize/2; i++){
+            mags[i] = shared_data[i];
+        }
+        pthread_mutex_unlock(&mutex);
+        draw_viz(mags, samplesize/2);
+        usleep(25000);
+    }
+}
+
 int main() {
     //initialize
     init_curses();
-    // pipe to capture the output
+    pthread_mutex_init(&mutex, NULL);
+    for(int i = 0; i < samplesize/2; i++){
+        shared_data[i] = 0;
+    }
+    pthread_t tid;
     int pipefd[2];
+    int thread_init = pthread_create(&tid, NULL, animation_thread, NULL);
+
+    //pipe to capture the output
     if (pipe(pipefd) == -1) {
         perror("pipe");
         exit(EXIT_FAILURE);
@@ -87,26 +135,26 @@ int main() {
 
         // not writing
         close(pipefd[1]);
-        ssize_t bytesRead;
-        char buffer[1024];
-        // continuously read output from audio tap
-        while ((bytesRead = read(pipefd[0], buffer, sizeof(buffer))) > 0) {
-            // tokenize and read
-            double amplitudes[128]; // init buffer
-            char *token = strtok(buffer, "\n");
+        FILE * readend = fdopen(pipefd[0], "r"); // open pipe read as file interface
+
+        while(1){
+            // read sample from audio tap
+            double amplitudes[samplesize]; // init buffer
             int count = 0;
-            while (token != NULL) {
-                if(strcmp(token, "end" ) == 0){
-                    break;
-                }else{
-                    // convert parsed to float
-                    double value = atof(token);
+
+            while (count < samplesize) {
+                char buffer[32];
+                if(fgets(buffer, sizeof(buffer), readend) != NULL){
+                    // convert parsed to double and store
+                    double value = atof(buffer);
                     amplitudes[count] = value;
                     //printf("Parsed float: %f\n", value);
 
-                    // get next line
                     count++;
-                    token = strtok(NULL, "\n");
+                }else{
+                    //break;
+                    perror("fgets null, audio tap failure/desync");
+                    exit(EXIT_FAILURE);
                 }
             }
 
@@ -114,28 +162,22 @@ int main() {
             fftw_complex *in, *out;
             fftw_plan p;
 
-            in = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * count);
-            out = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * count);
+            in = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * samplesize);
+            out = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * samplesize);
 
-            for(int i = 0; i < count; i++){
+            for(int i = 0; i < samplesize; i++){
                 in[i][0] = amplitudes[i]; // real part
                 in[i][1] = 0.0; // real input, no complex 
             }
 
             // go go gadget fft
-            p = fftw_plan_dft_1d(count, in, out, FFTW_FORWARD, FFTW_ESTIMATE); 
+            p = fftw_plan_dft_1d(samplesize, in, out, FFTW_FORWARD, FFTW_ESTIMATE); 
             fftw_execute(p);
 
             // init magnitudes
-            double * magnitudes = malloc(sizeof(double) * count);
+            double magnitudes[samplesize/2]; 
 
-            for (int i = 0; i < count; i++) {
-                magnitudes[i] = sqrt(out[i][0] * out[i][0] + out[i][1] * out[i][1]);
-            }
-
-            // normalize magnitudes
-
-            for (int i = 0; i < count; i++) {
+            for (int i = 0; i < samplesize/2; i++) {
                 magnitudes[i] = sqrt(out[i][0] * out[i][0] + out[i][1] * out[i][1]);
             }
 
@@ -144,28 +186,19 @@ int main() {
             fftw_free(in);
             fftw_free(out);
 
-            //min_max_normalization(magnitudes, count);
+            z_score_normalization(magnitudes, samplesize/2);
 
-            long int * scaled_mags = malloc(sizeof(long int) * count);
-            int scale_factor = LINES - 1;
-
-            for (int i = 0; i < count; i++) {
-                scaled_mags[i] = round(scale_factor * magnitudes[i]);
+            pthread_mutex_lock(&mutex);
+            for (int i = 0; i < samplesize/2; i++) {
+                shared_data[i] = (int) (sqrt(magnitudes[i]) * 10);
             }
-
-            free(magnitudes);
-
-            draw_viz(scaled_mags, count);
-            free(scaled_mags);
+            pthread_mutex_unlock(&mutex);
         }
 
-        if (bytesRead == -1) {
-            perror("read");
-            exit(EXIT_FAILURE);
-        }
         // Wait for the child process to finish
         waitpid(pid, NULL, 0);
     }
 
+    endwin();
     return 0;
 }

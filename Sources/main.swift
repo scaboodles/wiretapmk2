@@ -12,7 +12,7 @@ if #available(macOS 10.14, *) {
 } // else just send it?
 
 let audioInputNode = audioEngine.inputNode
-audioInputNode.installTap(onBus: 0, bufferSize: 1024, format: audioInputNode.inputFormat(forBus: 0)) { buffer, when in
+audioInputNode.installTap(onBus: 0, bufferSize: 256, format: audioInputNode.inputFormat(forBus: 0)) { buffer, when in
     for channel in 0..<Int(buffer.format.channelCount) {
         let channelData = buffer.floatChannelData?[channel]
         // print each frame for sample 
@@ -23,8 +23,6 @@ audioInputNode.installTap(onBus: 0, bufferSize: 1024, format: audioInputNode.inp
             }
         }
     }
-
-    print("end") //notify end of sample
 }
 
 do {
