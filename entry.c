@@ -9,7 +9,6 @@
 #include <ncurses.h>
 #include <pthread.h>
 
-
 const int samplesize = 1500;
 int shared_data[samplesize/2];
 pthread_mutex_t mutex;
