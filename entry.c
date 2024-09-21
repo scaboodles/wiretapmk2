@@ -8,10 +8,16 @@
 #include <math.h>
 #include <ncurses.h>
 #include <pthread.h>
+#include <fcntl.h>
+#include <errno.h>
 
 const int samplesize = 1500;
 int shared_data[samplesize/2];
-pthread_mutex_t mutex;
+char spotifybuffer[1024];
+char currsonginfo[1024];
+
+pthread_mutex_t fftmutex;
+pthread_mutex_t spotifymutex;
 
 int init_curses(){
     initscr(); cbreak(); noecho(); // curses bs 
@@ -30,23 +36,23 @@ int init_curses(){
 }
 
 // use min max normalization to scale magnitudes to emphasize deviations (bad and dumb)
-void min_max_normalization(double arr[], int size) { 
-    double min_val = arr[0];
-    double max_val = arr[0];
+//void min_max_normalization(double arr[], int size) { 
+    //double min_val = arr[0];
+    //double max_val = arr[0];
 
-    for (int i = 1; i < size; ++i) {
-        if (arr[i] < min_val) {
-            min_val = arr[i];
-        }
-        if (arr[i] > max_val) {
-            max_val = arr[i];
-        }
-    }
+    //for (int i = 1; i < size; ++i) {
+        //if (arr[i] < min_val) {
+            //min_val = arr[i];
+        //}
+        //if (arr[i] > max_val) {
+            //max_val = arr[i];
+        //}
+    //}
 
-    for (int i = 0; i < size; ++i) {
-        arr[i] = (arr[i] - min_val) / (max_val - min_val);
-    }
-}
+    //for (int i = 0; i < size; ++i) {
+        //arr[i] = (arr[i] - min_val) / (max_val - min_val);
+    //}
+//}
 
 void z_score_normalization(double arr[], int size) {
     double sum = 0.0;
@@ -63,6 +69,18 @@ void z_score_normalization(double arr[], int size) {
 
     for (int i = 0; i < size; ++i) {
         arr[i] = (arr[i] - mean) / std_deviation;
+    }
+}
+
+void writesongartist(char * str){
+    int rows, cols;
+    getmaxyx(stdscr, rows, cols);
+    if(strlen(str) == 0){
+        mvprintw(0, 0, "bad");
+    }else{
+        size_t offset = strlen(str);
+        int start_col = cols - offset;
+        mvprintw(0, start_col, "%s", str);
     }
 }
 
@@ -84,23 +102,82 @@ void * animation_thread(){
     sleep(1);
     while(1){
         int mags[samplesize/2];
-        pthread_mutex_lock(&mutex);
+
+        pthread_mutex_lock(&fftmutex);
         for(int i = 0; i < samplesize/2; i++){
             mags[i] = shared_data[i];
         }
-        pthread_mutex_unlock(&mutex);
+        pthread_mutex_unlock(&fftmutex);
+
         draw_viz(mags, samplesize/2);
+
+        pthread_mutex_lock(&spotifymutex);
+
+        strcpy(currsonginfo, spotifybuffer);
+
+        pthread_mutex_unlock(&spotifymutex);
+
+        writesongartist(currsonginfo);
+
+        refresh();
         usleep(25000);
     }
+}
+typedef struct {
+    FILE * spotifile;
+} SpotifyThreadArgs;
+
+void * spotify_read_thread(void *args) {
+    SpotifyThreadArgs * threadArgs = (SpotifyThreadArgs *)args;
+
+    int flags = fcntl(fileno(threadArgs->spotifile), F_GETFL, 0);
+    fcntl(fileno(threadArgs->spotifile), F_SETFL, flags | O_NONBLOCK);
+
+    char buffer[1024];
+    while (1) {
+        pthread_mutex_lock(&spotifymutex);
+
+        // read from the py script without blocking
+        if (fgets(buffer, sizeof(buffer), threadArgs->spotifile) != NULL) {
+            // read new data
+            if(strlen(buffer) > 0 && strcmp(buffer, "\n") != 0){
+                strcpy(spotifybuffer, buffer);
+            }
+        } else {
+            // no data read; check if end-of-file or just no data available
+            if (feof(threadArgs->spotifile)) {
+                // EOF reached; handle end-of-file 
+                clearerr(threadArgs->spotifile);  // clear the EOF flag
+            } else if (errno != EWOULDBLOCK && errno != EAGAIN) {
+                // error
+                perror("error reading from python");
+                pthread_mutex_unlock(&spotifymutex);
+                break;
+            }
+            // here-> no new data; retain buffer
+        }
+
+        pthread_mutex_unlock(&spotifymutex);
+
+        usleep(500000);
+    }
+
+    return NULL;
 }
 
 int main() {
     //initialize
     init_curses();
-    pthread_mutex_init(&mutex, NULL);
+    pthread_mutex_init(&fftmutex, NULL);
+    pthread_mutex_init(&spotifymutex, NULL);
+
     for(int i = 0; i < samplesize/2; i++){
         shared_data[i] = 0;
     }
+    for(int i = 0; i < sizeof(spotifybuffer); i++){
+        spotifybuffer[i] = '\0';
+    }
+
     pthread_t tid;
     int pipefd[2];
     int thread_init = pthread_create(&tid, NULL, animation_thread, NULL);
@@ -110,6 +187,8 @@ int main() {
         perror("pipe");
         exit(EXIT_FAILURE);
     }
+
+    const char * home = getenv("HOME");
 
     pid_t pid = fork();
 
@@ -125,16 +204,65 @@ int main() {
         close(pipefd[1]);
 
         // initialize tap from swift
-        execlp("./main", "main", "-", NULL);
+        const char * swiftpath = "/dev/wiretapmk2/main";
+
+        size_t pathlen = strlen(home) + strlen(swiftpath) + 1;
+        char * abspath = malloc(pathlen);
+        strcpy(abspath, home);
+        strcat(abspath, swiftpath);
+
+        execlp(abspath, "main", "-", NULL);
 
         // If execlp fails
         perror("execlp");
+        free(abspath);
         exit(EXIT_FAILURE);
     } else { // parent
-
+        // manage tap pipe
         // not writing
         close(pipefd[1]);
-        FILE * readend = fdopen(pipefd[0], "r"); // open pipe read as file interface
+        FILE * tapreadend = fdopen(pipefd[0], "r"); // open pipe read as file interface
+
+        // popen python process for song / artist data
+        FILE * spotifile;
+
+        char * venvpath = "/dev/wiretapmk2/python/venv/bin/python";
+        char * pypath = "/dev/wiretapmk2/python/spotify_req.py";
+
+        size_t homelen = strlen(home);
+
+        char *absvenv = malloc(homelen + strlen(venvpath) + 1);
+        char *abspy = malloc(homelen + strlen(pypath) + 1);
+
+        strcpy(absvenv, home);
+        strcat(absvenv, venvpath); // absvenv now contains the absolute path to the virtual py interpreter
+
+        strcpy(abspy, home);
+        strcat(abspy, pypath); // abspy now contains the absolute path to the py script
+
+        // final command string
+        char *abspythonpath = malloc(strlen(absvenv) + strlen(abspy) + 2);  // +2 for space and null terminator
+        sprintf(abspythonpath, "%s %s", absvenv, abspy);
+
+        spotifile = popen(abspythonpath, "r");
+
+        free(absvenv);
+        free(abspy);
+        free(abspythonpath);
+
+        if (spotifile == NULL) {
+            perror("popen failed");
+            return 1;
+        }
+
+        pthread_t pyhtonthread;
+        SpotifyThreadArgs threadArgs = {spotifile};
+
+        if (pthread_create(&pyhtonthread, NULL, spotify_read_thread, &threadArgs) != 0) {
+            perror("pthread_create failed");
+            pclose(spotifile);
+            return 1;
+        }
 
         while(1){
             // read sample from audio tap
@@ -143,7 +271,7 @@ int main() {
 
             while (count < samplesize) {
                 char buffer[32];
-                if(fgets(buffer, sizeof(buffer), readend) != NULL){
+                if(fgets(buffer, sizeof(buffer), tapreadend) != NULL){
                     // convert parsed to double and store
                     double value = atof(buffer);
                     amplitudes[count] = value;
@@ -187,11 +315,11 @@ int main() {
 
             z_score_normalization(magnitudes, samplesize/2);
 
-            pthread_mutex_lock(&mutex);
+            pthread_mutex_lock(&fftmutex);
             for (int i = 0; i < samplesize/2; i++) {
                 shared_data[i] = (int) (sqrt(magnitudes[i]) * 10);
             }
-            pthread_mutex_unlock(&mutex);
+            pthread_mutex_unlock(&fftmutex);
         }
 
         // Wait for the child process to finish
