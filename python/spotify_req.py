@@ -36,19 +36,34 @@ def get_song_artist(token):
     resp = requests.get(CURRENTLY_PLAYING_ENDPOINT, headers=auth_headers)
     if(resp.status_code == 200):
         data = resp.json()
+        if(data == None or 'item' not in data or 'name' not in data['item']):
+            return -2
         song = data['item']['name']
         artist = data['item']['artists'][0]['name']
         return"{0}, {1}".format(song, artist)
+    elif(resp.status_code == 401):
+        return -1
     else:
         return "no active spotify session"
 
 
 def main():
+    authtoken = refreshAuthorization()
     while True:
-        req = get_song_artist(refreshAuthorization())
+        req = get_song_artist(authtoken)
+
+        if(req == -1):
+            authtoken = refreshAuthorization()
+            req = get_song_artist(authtoken)
+        elif(req == -2):
+            authtoken = refreshAuthorization()
+            while(req == -2):
+                time.sleep(11)
+                req = get_song_artist(authtoken)
+
         print("{0}\n".format(req))
         sys.stdout.flush()
-        time.sleep(3)
+        time.sleep(7)
 
 if __name__ == "__main__":
     main()
